@@ -1,0 +1,17 @@
+- hosts: "{{ ansible_play_batch }}"
+  # serial: 1
+  become: true
+  environment:
+    PATH: /opt/mqm/bin:{{ ansible_env.PATH }}
+  vars_files:
+    - vars/secrets.yml
+  vars:
+    qmgr_name: NATIVEHAQM
+    mq_port: 1414
+    mq_replication_port: 9414
+    # keystore_passwd: *****
+    # ansible-vault create vars/secrets.yml
+    # ansible-playbook mq-setupnativeha.yml -i nativeha-inventory.ini --vault-password-file .vault_pass.txt
+    # chmod 600 ~/.vault_pass.txt (usual)
+  roles:
+    - setupnativeha

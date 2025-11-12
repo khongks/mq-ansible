@@ -1,0 +1,148 @@
+- name: Set MQ Environment and Display Version
+  ansible.builtin.shell: |
+    . /opt/mqm/bin/setmqenv -s
+    dspmqver -f2
+  register: mq_version_output
+  changed_when: false # This is an informational command, not a change
+  become: yes
+  become_user: mqm
+
+- name: Display the recorded MQ version output
+  ansible.builtin.debug:
+    msg: "{{ mq_version_output.stdout }}"
+  when: mq_version_output.rc == 0
+
+- name: Check if queue manager {{ qmgr_name }} already exists
+  ansible.builtin.command: >
+    dspmq -m "{{ qmgr_name }}"
+  register: dspmq_status
+  
+  # Fail the task if the dspmq command itself fails (rc != 0)
+  failed_when: dspmq_status.rc != 0
+  
+  # This task is a check, so it should never report a change itself
+  changed_when: false 
+  
+  become: yes
+  become_user: mqm
+
+- name: Set fact if queue manager {{ qmgr_name }} exists (Set Fact Action)
+  ansible.builtin.set_fact:
+    qmgr_exists: "{{ qmgr_name in dspmq_status.stdout }}"
+
+- name: Create MQ Queue Manager {{ qmgr_name }} if it does not exist
+  ansible.builtin.command: >
+    crtmqm 
+    -lr {{ nativeha_instance }} 
+    -lf 8192 
+    -lp 10 
+    -ls 10 
+    -p 1414 
+    {{ qmgr_name }}
+  when: not qmgr_exists
+  register: crtmqm_result
+  failed_when: crtmqm_result.rc != 0
+  changed_when: crtmqm_result.rc == 0 and 'already exists' not in crtmqm_result.stderr
+  become: yes
+  become_user: mqm
+
+- name: Create keystore and self-signed cert on the primary node
+  ansible.builtin.shell: |
+    # Define variables inside the shell block for clarity and reuse
+    SSL_FOLDER="/var/mqm/qmgrs/{{ qmgr_name }}/ssl"
+    KEYSTORE="${SSL_FOLDER}/keystore.kdb"
+    PASSWORD="{{ keystore_passwd }}"
+    
+    # Check if the keystore file already exists
+    if [ ! -f ${KEYSTORE} ]; then
+      echo "--- Creating new keystore and stashing password ---"
+      
+      # 1. Create the keystore database and stash file
+      runmqakm -keydb -create -db ${KEYSTORE} -pw ${PASSWORD} -stash
+      
+      # 2. Create the self-signed certificate. Using qmgr_name in the DN.
+      runmqakm -cert -create -db ${KEYSTORE} -pw ${PASSWORD} -label nha-qm-replication -dn "CN={{ qmgr_name }}-REPLICATION" -size 2048
+      
+    else
+      echo "Keystore already exists. Skipping creation."
+    fi
+  
+  register: create_keystore_output
+  
+  # Condition: Only run if the inventory_hostname matches the group variable 'nativeha_primary'
+  when: inventory_hostname == nativeha_primary
+  
+  changed_when: "'Skipping creation' not in create_keystore_output.stdout"
+  no_log: true
+  become: yes
+  become_user: mqm
+
+- name: Fetch Keystore and Stash file from Primary Node
+  ansible.builtin.fetch:
+    # Use the base path for both files
+    src: "/var/mqm/qmgrs/{{ qmgr_name }}/ssl/{{ item }}"
+    # Destination directory on the Ansible controller (will create unique subdirectories)
+    dest: "/tmp/ansible_mq_secrets/{{ qmgr_name }}/" 
+    flat: yes # Crucial: Copies file directly to dest, avoiding host-specific subdirectories
+  loop:
+    - keystore.kdb
+    - keystore.sth
+    - keystore.rdb
+    - keystore.crl
+  # Only run this task on the host whose inventory name matches the primary
+  when: inventory_hostname == nativeha_primary
+  become: yes
+  become_user: mqm
+
+- name: Copy Keystore to Replica Nodes from Controller Cache
+  ansible.builtin.copy:
+    # Source is the controller's temporary directory
+    src: "/tmp/ansible_mq_secrets/{{ qmgr_name }}/{{ item }}"
+    # Destination is the required SSL directory on the target host
+    dest: "/var/mqm/qmgrs/{{ qmgr_name }}/ssl/{{ item }}"
+    owner: mqm
+    group: mqm
+    mode: '0600' # Secure permissions for secret files
+  loop:
+    - keystore.kdb
+    - keystore.sth
+    - keystore.rdb
+    - keystore.crl
+  # Only run this task on hosts that are NOT the primary node
+  when: inventory_hostname != nativeha_primary
+  become: yes
+
+# In qm_ini_update_loop.yml
+- name: Configure NativeHA stanzas and create backup
+  block:
+    - name: Set qm.ini file path variable
+      ansible.builtin.set_fact:
+        mq_config_file: "/var/mqm/qmgrs/{{ qmgr_name }}/qm.ini"
+
+    - name: Run qm.ini configuration tasks
+      ansible.builtin.include_tasks: qm_ini_config.yml
+      vars:
+        qm_ini_file: "{{ mq_config_file }}" 
+
+  become: yes
+  become_user: mqm
+
+- name: Create symlink for mqmonitor@.service
+  ansible.builtin.file:
+    src: /opt/mqm/samp/mqmonitor@.service
+    dest: /etc/systemd/system/mqmonitor@.service
+    state: link # Ensures a symbolic link is created
+    owner: root
+    group: root
+    mode: '0644'
+  become: yes
+
+- name: Enable and start mqmonitor for {{ qmgr_name }}
+  ansible.builtin.systemd_service:
+    name: "mqmonitor@{{ qmgr_name }}" # Uses the template syntax (e.g., mqmonitor@NATIVEHAQM)
+    state: started # Ensures the service is started
+    enabled: yes   # Ensures the service starts on boot
+  become: yes
+  
+  # Note: The systemd_service module handles privilege escalation automatically if needed, 
+  # but we use 'become: yes' explicitly for clarity in this file.

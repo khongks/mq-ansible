@@ -1,0 +1,25 @@
+- name: Set 'nofile' limits in /etc/security/limits.conf
+  ansible.builtin.pam_limits:
+    domain: "{{ item.domain }}"
+    limit_type: "{{ item.limit_type }}"
+    limit_item: nofile
+    value: 524288
+  loop:
+    # Set soft and hard limits for the root user
+    - { domain: 'root', limit_type: 'soft' }
+    - { domain: 'root', limit_type: 'hard' }
+    # Set soft and hard limits for all users ('*')
+    - { domain: '*', limit_type: 'soft' }
+    - { domain: '*', limit_type: 'hard' }
+  become: yes
+
+- name: Ensure kernel threads-max is set to 32768 for system stability
+  ansible.posix.sysctl:
+    name: kernel.threads-max
+    value: '32768'
+    sysctl_set: yes
+    state: present
+    reload: yes # Apply the change immediately
+    # Writes the setting to a dedicated sysctl file for persistence
+    sysctl_file: /etc/sysctl.d/90-ibm-threads.conf 
+  become: yes

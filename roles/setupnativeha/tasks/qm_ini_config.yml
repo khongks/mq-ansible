@@ -1,0 +1,65 @@
+- name: Remove old NativeHALocalInstance stanza block
+  ansible.builtin.lineinfile:
+    path: "{{ qm_ini_file }}"
+    # Targets the Local HA header AND its options (Name, CipherSpec, etc.)
+    regexp: '^\s*(NativeHALocalInstance:|\s+(Name|CipherSpec|CertificateLabel|KeyRepository)=)'
+    state: absent 
+    backup: yes
+  become: yes
+  become_user: mqm
+
+- name: Remove all NativeHAInstance headers
+  ansible.builtin.lineinfile:
+    path: "{{ qm_ini_file }}"
+    # Targets the literal header "NativeHAInstance:", which you want removed
+    regexp: '^\s*NativeHAInstance:'
+    state: absent
+  become: no
+  become_user: mqm
+
+- name: Remove orphaned NativeHAInstance options
+  ansible.builtin.lineinfile:
+    path: "{{ qm_ini_file }}"
+    # Targets the indented options like "Name=alpha" or "ReplicationAddress=..."
+    regexp: '^\s+(Name|ReplicationAddress)='
+    state: absent
+  become: no
+  become_user: mqm
+
+- name: 1. Set or update NativeHALocalInstance details
+  ansible.builtin.lineinfile:
+    path: "{{ qm_ini_file }}"
+    
+    # Regex for idempotency: ensures the entire stanza is present exactly once
+    # It checks for "NativeHALocalInstance:" followed by "Name=..."
+    regexp: "^NativeHALocalInstance:\\s*\\n\\s*Name={{ nativeha_instance }}"
+    
+    # The 'line' parameter uses the | (literal block scalar) to ensure 
+    # the exact indentation (3 spaces for options) is written to the file.
+    line: "NativeHALocalInstance:\n   Name={{ nativeha_instance }}\n   CipherSpec=ANY_TLS12\n   CertificateLabel=nha-qm-replication\n   KeyRepository=/var/mqm/qmgrs/{{ qmgr_name }}/ssl/keystore"
+         
+    insertbefore: "^NativeHAInstance:" # Insert before the other HA stanzas
+    state: present
+    backup: no
+
+- name: 2. UPSERT NativeHAInstance stanzas for all cluster nodes
+  ansible.builtin.lineinfile:
+    path: "{{ qm_ini_file }}"
+    
+    # Regex ensures idempotency by checking for the NativeHAInstance header 
+    # followed by the specific host's Name= option.
+    regexp: "^NativeHAInstance:\\s*\\n\\s*Name={{ hostvars[item].nativeha_instance }}"
+    
+    # The 'line' parameter is compressed into a single line of YAML using the | 
+    # scalar, but the actual content written to the file maintains the multiline format
+    # and 3-space indentation (which is now done via a long string).
+    line: "NativeHAInstance:\n   Name={{ hostvars[item].nativeha_instance }}\n   ReplicationAddress={{ hostvars[item].ansible_host | default(hostvars[item].inventory_hostname) }}({{ mq_replication_port }})"
+      # line: |
+      # NativeHAInstance:
+      #    Name={{ hostvars[item].nativeha_instance }}
+      #   ReplicationAddress={{ hostvars[item].ansible_host | default(hostvars[item].inventory_hostname) }}({{ mq_replication_port }})
+         
+    insertbefore: "^LOG:"
+    state: present
+    backup: no # Changed to 'yes' for safety, but use 'no' if you don't want it.
+  loop: "{{ groups['mqservers'] }}"
