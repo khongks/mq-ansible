@@ -15,7 +15,7 @@
 
 1. Install MQ binaries.
     ```
-    ansible-playbook mq-setupnativeha.yml -i nativeha-inventory.ini
+    ansible-playbook mq-install.yml -i nativeha-inventory.ini -e 'ibmMqLicence=accept'
     ```
 
 1. Create a vault, specify your vault password in the prompt.
