@@ -17,8 +17,7 @@
     dspmq -m "{{ qmgr_name }}"
   register: dspmq_status
   
-  # Fail the task if the dspmq command itself fails (rc != 0)
-  failed_when: dspmq_status.rc != 0
+  failed_when: dspmq_status.rc != 0 and 'AMQ7048E' not in dspmq_status.stderr
   
   # This task is a check, so it should never report a change itself
   changed_when: false 
@@ -28,7 +27,7 @@
 
 - name: Set fact if queue manager {{ qmgr_name }} exists (Set Fact Action)
   ansible.builtin.set_fact:
-    qmgr_exists: "{{ qmgr_name in dspmq_status.stdout }}"
+    qmgr_exists: "{{ dspmq_status.rc == 0 }}"
 
 - name: Create MQ Queue Manager {{ qmgr_name }} if it does not exist
   ansible.builtin.command: >
